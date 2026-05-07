@@ -61,6 +61,11 @@ function broadcastUsers(room) {
   io.to(room.id).emit("room_state", publicState(room));
 }
 
+// REST: health check
+app.get("/", (_req, res) => {
+  res.json({ status: "ok", message: "Backend is working perfectly!" });
+});
+
 // REST: create room
 app.post("/api/rooms", (_req, res) => {
   const id = nanoid(8);
