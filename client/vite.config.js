@@ -5,6 +5,6 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: true,
-    allowedHosts: [" https://vegas-boxes-rocky-kenny.trycloudflare.com"]
+    allowedHosts: ["https://watch-togeather2.onrender.com"]
   }
 });
