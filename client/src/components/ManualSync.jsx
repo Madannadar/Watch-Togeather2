@@ -1,20 +1,5 @@
 import React, { useEffect, useState } from "react";
-
-// Convert "1:23" or "83" -> seconds.
-function parseTime(input) {
-  if (!input) return 0;
-  if (input.includes(":")) {
-    const [m, s] = input.split(":").map(Number);
-    return (m || 0) * 60 + (s || 0);
-  }
-  return Number(input) || 0;
-}
-function fmt(sec) {
-  sec = Math.max(0, Math.floor(sec));
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
-}
+import { fmt, parseTime } from "../utils/timeFormat.js";
 
 export default function ManualSync({ socket, isHost, hostTime, instruction, countdown }) {
   const [ts, setTs] = useState("");

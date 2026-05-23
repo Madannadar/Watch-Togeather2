@@ -1,26 +1,54 @@
 import React, { useEffect, useRef } from "react";
-import { loadYouTubeAPI } from "../youtube.js";
+import { loadYouTubeAPI } from "../utils/youtube.js";
+import { computeSyncAction, applySyncToPlayer, lagAdjustedTarget } from "../utils/syncEngine.js";
 
 /**
  * YouTubePlayer
- *  - Host: emits play/pause/seek + periodic drift sync_state every 5s.
- *  - Clients: react to incoming events. Compensates for network latency using
- *    serverTime so playback aligns with the host's clock.
+ *
+ * Host:
+ *  - Emits play/pause/seek via onStateChange
+ *  - Emits periodic sync_state every 5s
+ *  - Detects manual seeks via 1s polling
+ *
+ * Clients (Hard Sync mode):
+ *  - Receives play/pause/seek/sync_state
+ *  - Uses syncEngine for smooth drift correction:
+ *      drift < 0.75s → ignore
+ *      drift 0.75-2s → rate adjust (no seek)
+ *      drift > 2s    → hard seek
+ *
+ * Clients (Presence Mode):
+ *  - Receives host_time for awareness
+ *  - Does NOT auto-seek or auto-play
+ *  - User controls their own playback
+ *  - Emits user_pause when pausing
+ *
+ * Props:
+ *  videoId, isHost, socket, initial, isPresenceMode, onTimeUpdate
  */
-export default function YouTubePlayer({ videoId, isHost, socket, initial }) {
+export default function YouTubePlayer({
+  videoId,
+  isHost,
+  socket,
+  initial,
+  isPresenceMode = false,
+  onTimeUpdate,
+}) {
   const containerRef = useRef(null);
   const playerRef = useRef(null);
   const lastEmitRef = useRef(0);
-  const suppressRef = useRef(false); // ignore self-triggered state changes after remote sync
+  const suppressRef = useRef(false);
   const driftTimerRef = useRef(null);
+  const rateTimerRef = useRef(null); // for soft sync rate correction reset
 
-  // Mount / re-mount when videoId changes.
+  // ── Mount / re-mount when videoId changes ────────────────────────────
   useEffect(() => {
     if (!videoId) return;
     let destroyed = false;
+
     loadYouTubeAPI().then((YT) => {
       if (destroyed) return;
-      // Reuse player if exists, else create.
+
       if (playerRef.current && playerRef.current.loadVideoById) {
         playerRef.current.loadVideoById({
           videoId,
@@ -29,6 +57,7 @@ export default function YouTubePlayer({ videoId, isHost, socket, initial }) {
         if (!initial?.playing) playerRef.current.pauseVideo();
         return;
       }
+
       playerRef.current = new YT.Player(containerRef.current, {
         videoId,
         playerVars: { autoplay: 0, controls: 1, rel: 0 },
@@ -39,25 +68,34 @@ export default function YouTubePlayer({ videoId, isHost, socket, initial }) {
             else playerRef.current.pauseVideo();
           },
           onStateChange: (e) => {
-            if (!isHost) return;
-            // YT.PlayerState: 1 PLAYING, 2 PAUSED
-            if (suppressRef.current) return;
-            const t = playerRef.current.getCurrentTime();
-            const now = Date.now();
-            if (now - lastEmitRef.current < 150) return; // debounce bursts
-            lastEmitRef.current = now;
-            if (e.data === 1) socket?.emit("play", { time: t });
-            else if (e.data === 2) socket?.emit("pause", { time: t });
+            // ── Host: emit play/pause events ────────────────────────────
+            if (isHost) {
+              if (suppressRef.current) return;
+              const t = playerRef.current.getCurrentTime();
+              const now = Date.now();
+              if (now - lastEmitRef.current < 150) return; // debounce bursts
+              lastEmitRef.current = now;
+              if (e.data === 1) socket?.emit("play", { time: t });
+              else if (e.data === 2) socket?.emit("pause", { time: t });
+              return;
+            }
+
+            // ── Non-host in Presence Mode: emit user_pause ───────────────
+            if (isPresenceMode && e.data === 2) {
+              const t = playerRef.current.getCurrentTime();
+              socket?.emit("user_pause", { time: t });
+            }
           },
         },
       });
     });
+
     return () => {
       destroyed = true;
     };
   }, [videoId]);
 
-  // Host: periodic drift sync every 5s.
+  // ── Host: periodic drift sync every 5s ───────────────────────────────
   useEffect(() => {
     if (!isHost || !socket) return;
     driftTimerRef.current = setInterval(() => {
@@ -71,7 +109,7 @@ export default function YouTubePlayer({ videoId, isHost, socket, initial }) {
     return () => clearInterval(driftTimerRef.current);
   }, [isHost, socket]);
 
-  // Host: detect manual seeks (compare expected vs actual once per second).
+  // ── Host: detect manual seeks (compare expected vs actual 1/s) ───────
   useEffect(() => {
     if (!isHost || !socket) return;
     let lastT = 0;
@@ -86,61 +124,88 @@ export default function YouTubePlayer({ videoId, isHost, socket, initial }) {
       }
       lastT = t;
       lastWall = Date.now();
+
+      // Report current time to parent (for FloatingWidget local time display)
+      onTimeUpdate?.(t);
     }, 1000);
     return () => clearInterval(id);
-  }, [isHost, socket]);
+  }, [isHost, socket, onTimeUpdate]);
 
-  // Client listeners. Compensate latency: target = time + (now - serverTime)/1000.
+  // ── Non-host: time reporting for FloatingWidget ───────────────────────
+  useEffect(() => {
+    if (isHost) return;
+    const id = setInterval(() => {
+      const p = playerRef.current;
+      if (!p?.getCurrentTime) return;
+      onTimeUpdate?.(p.getCurrentTime());
+    }, 1000);
+    return () => clearInterval(id);
+  }, [isHost, onTimeUpdate]);
+
+  // ── Client: socket event listeners ───────────────────────────────────
   useEffect(() => {
     if (!socket) return;
-    const apply = (data, shouldPlay) => {
+
+    // Hard sync: apply play with lag compensation
+    const onPlay = (d) => {
+      if (isHost) return;
+      if (isPresenceMode) return; // presence mode: don't force play
       const p = playerRef.current;
-      if (!p || !p.seekTo) return;
-      const lag = (Date.now() - data.serverTime) / 1000;
-      const target = data.time + (shouldPlay ? Math.max(0, lag) : 0);
+      if (!p?.seekTo) return;
+      const target = lagAdjustedTarget(d.time, d.serverTime, true);
       suppressRef.current = true;
       p.seekTo(target, true);
-      if (shouldPlay) p.playVideo();
-      else p.pauseVideo();
+      p.playVideo();
       setTimeout(() => (suppressRef.current = false), 400);
     };
-    const onPlay = (d) => !isHost && apply(d, true);
-    const onPause = (d) => !isHost && apply(d, false);
+
+    // Hard sync: apply pause
+    const onPause = (d) => {
+      if (isHost) return;
+      if (isPresenceMode) return; // presence mode: don't force pause
+      const p = playerRef.current;
+      if (!p?.seekTo) return;
+      suppressRef.current = true;
+      p.seekTo(d.time, true);
+      p.pauseVideo();
+      setTimeout(() => (suppressRef.current = false), 400);
+    };
+
+    // Hard sync: seek correction
     const onSeek = (d) => {
       if (isHost) return;
+      if (isPresenceMode) return;
       const p = playerRef.current;
       if (!p) return;
       suppressRef.current = true;
       p.seekTo(d.time, true);
       setTimeout(() => (suppressRef.current = false), 400);
     };
+
+    // Periodic sync — uses soft sync engine
     const onSync = (d) => {
       if (isHost) return;
+      if (isPresenceMode) return; // presence mode: ignore forced sync
       const p = playerRef.current;
-      if (!p || !p.getCurrentTime) return;
-      const lag = (Date.now() - d.serverTime) / 1000;
-      const target = d.time + (d.playing ? Math.max(0, lag) : 0);
-      // Only correct if drift > 0.75s to avoid jitter.
-      if (Math.abs(p.getCurrentTime() - target) > 0.75) {
-        suppressRef.current = true;
-        p.seekTo(target, true);
-        setTimeout(() => (suppressRef.current = false), 400);
-      }
-      if (d.playing && p.getPlayerState() !== 1) p.playVideo();
-      if (!d.playing && p.getPlayerState() === 1) p.pauseVideo();
+      if (!p?.getCurrentTime) return;
+
+      const target = lagAdjustedTarget(d.time, d.serverTime, d.playing);
+      const action = computeSyncAction(p.getCurrentTime(), target, d.playing);
+      applySyncToPlayer(p, action, suppressRef, rateTimerRef, d.playing);
     };
 
     socket.on("play", onPlay);
     socket.on("pause", onPause);
     socket.on("seek", onSeek);
     socket.on("sync_state", onSync);
+
     return () => {
       socket.off("play", onPlay);
       socket.off("pause", onPause);
       socket.off("seek", onSeek);
       socket.off("sync_state", onSync);
     };
-  }, [socket, isHost]);
+  }, [socket, isHost, isPresenceMode]);
 
   return (
     <div className="w-full aspect-video bg-black rounded-xl overflow-hidden">
@@ -154,6 +219,3 @@ export default function YouTubePlayer({ videoId, isHost, socket, initial }) {
     </div>
   );
 }
-
-// Expose a getter on window for ManualSync soft drift display.
-// (Used by Room.jsx via querying the iframe player instance.)
