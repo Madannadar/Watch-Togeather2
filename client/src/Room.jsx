@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import { useSocket } from "./hooks/useSocket.js";
 import { extractVideoId } from "./utils/youtube.js";
 import YouTubePlayer from "./components/YouTubePlayer.jsx";
@@ -9,25 +9,27 @@ import { ReactionBar, FloatingReactions } from "./components/Reactions.jsx";
 import PresencePanel from "./components/PresencePanel.jsx";
 import FloatingWidget from "./components/FloatingWidget.jsx";
 import { ToastContainer, toast } from "./components/Toast.jsx";
+import NameModal from "./components/NameModal.jsx";
+import { RoomSkeleton, RoomNotFound } from "./components/RoomSkeleton.jsx";
 import { usePresence } from "./hooks/usePresence.js";
 import { useSyncMode } from "./hooks/useSyncMode.js";
 import { useAudio } from "./hooks/useAudio.js";
 
-function randomName() {
-  const n = ["Fox", "Owl", "Tiger", "Panda", "Wolf", "Otter", "Bear"];
-  return n[Math.floor(Math.random() * n.length)] + Math.floor(Math.random() * 99);
-}
-
 export default function Room() {
   const { id: roomId } = useParams();
-  const [name] = useState(() => {
-    const k = "wt_name";
-    let v = localStorage.getItem(k);
-    if (!v) { v = randomName(); localStorage.setItem(k, v); }
-    return v;
-  });
+  const navigate = useNavigate();
 
-  const { socket, connected } = useSocket(roomId, name);
+  // ── Name handling ─────────────────────────────────────────────────
+  const [name, setName] = useState(() => localStorage.getItem("wt_name") || "");
+  const [nameReady, setNameReady] = useState(!!name);
+
+  function onNameConfirm(n) {
+    setName(n);
+    setNameReady(true);
+  }
+
+  // Only connect socket after name is confirmed
+  const { socket, connected } = useSocket(nameReady ? roomId : null, name);
   const audio = useAudio();
 
   const [state, setState] = useState(null);
@@ -37,11 +39,14 @@ export default function Room() {
   const [copyOk, setCopyOk] = useState(false);
   const [localTime, setLocalTime] = useState(null);
 
-  // Mobile chat drawer state
+  // Mobile chat drawer
   const [chatOpen, setChatOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
 
-  // Manual mode state
+  // Loading / not found
+  const [notFound, setNotFound] = useState(false);
+
+  // Manual mode
   const [instruction, setInstruction] = useState(null);
   const [countdown, setCountdown] = useState(null);
   const [hostTime, setHostTime] = useState(null);
@@ -49,15 +54,24 @@ export default function Room() {
   const myId = socket?.id;
   const isHost = state && myId && state.hostId === myId;
 
-  // ── Sync Mode ────────────────────────────────────────────────────────
+  // ── Room not found timeout ────────────────────────────────────────
+  useEffect(() => {
+    if (state) return; // already received state
+    if (!nameReady) return; // haven't joined yet
+    const timer = setTimeout(() => {
+      if (!state) setNotFound(true);
+    }, 10000);
+    return () => clearTimeout(timer);
+  }, [nameReady, state]);
+
+  // ── Sync Mode ─────────────────────────────────────────────────────
   const { syncMode, setSyncMode, isPresenceMode } = useSyncMode({
     socket, isHost, initialMode: "hard",
   });
 
-  // ── Presence ─────────────────────────────────────────────────────────
+  // ── Presence ──────────────────────────────────────────────────────
   const playerTimeRef = useRef(null);
   const getPlayerTime = () => playerTimeRef.current ?? 0;
-
   const { viewers } = usePresence({
     socket, isHost,
     hostId: state?.hostId,
@@ -70,33 +84,43 @@ export default function Room() {
     setLocalTime(t);
   }
 
-  // ── Socket wiring ─────────────────────────────────────────────────────
+  // ── Socket wiring ─────────────────────────────────────────────────
   useEffect(() => {
     if (!socket) return;
 
     const onState = (s) => {
       const prev = state;
       setState(s);
+      setNotFound(false);
 
       if (prev && s.users.length > prev.users.length) {
         audio.play("join");
         const newUser = s.users.find((u) => !prev.users.some((p) => p.id === u.id));
-        if (newUser && newUser.id !== myId) toast.show(`${newUser.name} joined the room`, "info");
+        if (newUser && newUser.id !== myId) toast.show(`${newUser.name} joined`, "info");
       }
       if (prev && s.users.length < prev.users.length) {
         audio.play("leave");
         const leftUser = prev.users.find((u) => !s.users.some((p) => p.id === u.id));
-        if (leftUser && leftUser.id !== myId) toast.show(`${leftUser.name} left the room`, "info");
+        if (leftUser && leftUser.id !== myId) toast.show(`${leftUser.name} left`, "info");
       }
     };
 
     const onChat = (m) => {
       setMessages((prev) => [...prev, m]);
-      // Increment unread badge when drawer is closed
-      setChatOpen((open) => {
-        if (!open) setUnreadCount((c) => c + 1);
-        return open;
-      });
+      setChatOpen((open) => { if (!open) setUnreadCount((c) => c + 1); return open; });
+    };
+
+    // Handle message reactions (merge into messages)
+    const onMsgReaction = ({ messageId, emoji, userId, name: reactorName }) => {
+      setMessages((prev) => prev.map((m) => {
+        if (m.id !== messageId) return m;
+        const reactions = { ...(m.reactions || {}) };
+        if (!reactions[emoji]) reactions[emoji] = [];
+        if (!reactions[emoji].includes(reactorName)) {
+          reactions[emoji] = [...reactions[emoji], reactorName];
+        }
+        return { ...m, reactions };
+      }));
     };
 
     const onReaction = ({ emoji, id }) => {
@@ -133,8 +157,8 @@ export default function Room() {
     const onSyncMode = ({ syncMode: newMode }) => {
       toast.show(
         newMode === "presence"
-          ? "Host switched to Presence Mode — control your own playback"
-          : "Host switched to Hard Sync — all playback is synced",
+          ? "Presence Mode — control your own playback"
+          : "Hard Sync — all playback synced",
         "info"
       );
     };
@@ -144,6 +168,7 @@ export default function Room() {
 
     socket.on("room_state", onState);
     socket.on("chat_message", onChat);
+    socket.on("message_reaction", onMsgReaction);
     socket.on("reaction", onReaction);
     socket.on("manual_sync", onManualSync);
     socket.on("countdown_start", onCountdown);
@@ -156,6 +181,7 @@ export default function Room() {
     return () => {
       socket.off("room_state", onState);
       socket.off("chat_message", onChat);
+      socket.off("message_reaction", onMsgReaction);
       socket.off("reaction", onReaction);
       socket.off("manual_sync", onManualSync);
       socket.off("countdown_start", onCountdown);
@@ -167,7 +193,7 @@ export default function Room() {
     };
   }, [socket, myId, isHost]);
 
-  // Host: manual mode clock tick
+  // Host: manual mode clock
   const manualClockRef = useRef(0);
   useEffect(() => {
     if (!socket || !isHost || state?.mode !== "manual") return;
@@ -181,165 +207,148 @@ export default function Room() {
   // Connection state audio
   const wasConnected = useRef(false);
   useEffect(() => {
-    if (connected && !wasConnected.current) {
-      wasConnected.current = true;
-    } else if (!connected && wasConnected.current) {
-      toast.show("Connection lost — reconnecting…", "error");
-    }
+    if (connected && !wasConnected.current) wasConnected.current = true;
+    else if (!connected && wasConnected.current) toast.show("Reconnecting…", "error");
   }, [connected]);
 
-  // ── Actions ───────────────────────────────────────────────────────────
+  // ── Actions ───────────────────────────────────────────────────────
   function loadUrl() {
     const vid = extractVideoId(urlInput.trim());
     if (!vid) return toast.show("Invalid YouTube URL", "error");
     socket?.emit("load_video", { videoId: vid });
+    setUrlInput("");
   }
   function setMode(mode) { socket?.emit("set_mode", { mode }); }
   function react(emoji) { socket?.emit("reaction", { emoji }); }
   async function copyLink() {
     await navigator.clipboard.writeText(window.location.href);
     setCopyOk(true);
-    toast.show("Link copied! Share with friends 🎉", "success");
+    toast.show("Link copied! 🎉", "success");
     setTimeout(() => setCopyOk(false), 1500);
   }
   function handleCatchUp() {
     if (!socket) return;
     socket.emit("resync_request");
-    toast.show("Catching up to host…", "info");
+    toast.show("Catching up…", "info");
     audio.play("sync");
   }
-  function openChat() {
-    setChatOpen(true);
-    setUnreadCount(0);
-  }
+  function openChat() { setChatOpen(true); setUnreadCount(0); }
 
   const initial = useMemo(
     () => state && { currentTime: state.currentTime, playing: state.playing },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [state?.videoId]
   );
-
   const hostProjectedTime = state?.currentTime ?? null;
 
-  // ─────────────────────────────────────────────────────────────────────
-  // RENDER
-  // Layout strategy:
-  //  Mobile  → fixed viewport height, no page scroll
-  //            [TopNav] [Video] [ControlsBar] [BottomBar w/ chat button]
-  //            Chat = slide-up portal drawer
-  //  Desktop → side-by-side, chat in right sidebar (unchanged)
-  // ─────────────────────────────────────────────────────────────────────
+  // ── Conditional renders ───────────────────────────────────────────
+
+  // 1. Show name modal if no name
+  if (!nameReady) {
+    return <NameModal onConfirm={onNameConfirm} defaultValue={name} />;
+  }
+
+  // 2. Show not-found screen
+  if (notFound) {
+    return <RoomNotFound roomId={roomId} onGoHome={() => navigate("/")} />;
+  }
+
+  // 3. Show loading skeleton while waiting for first room_state
+  if (!state) {
+    return (
+      <>
+        <ToastContainer />
+        <RoomSkeleton />
+      </>
+    );
+  }
+
+  // ── Main room layout ──────────────────────────────────────────────
   return (
-    // Root: full viewport, no overflow on mobile
-    <div className="h-[100dvh] flex flex-col lg:flex-row overflow-hidden bg-slate-950">
+    <div className="h-[100dvh] flex flex-col lg:flex-row overflow-hidden"
+         style={{ background: "#050d1a" }}>
       <ToastContainer />
 
-      {/* Floating sync widget (portal) */}
       <FloatingWidget
-        roomId={roomId}
-        connected={connected}
-        isHost={isHost}
-        hostTime={hostProjectedTime}
-        localTime={localTime}
+        roomId={roomId} connected={connected} isHost={isHost}
+        hostTime={hostProjectedTime} localTime={localTime}
         userCount={state?.users?.length || 0}
-        syncMode={syncMode}
-        onSetSyncMode={setSyncMode}
-        onCatchUp={handleCatchUp}
-        onReact={react}
-        isPresenceMode={isPresenceMode}
+        syncMode={syncMode} onSetSyncMode={setSyncMode}
+        onCatchUp={handleCatchUp} onReact={react} isPresenceMode={isPresenceMode}
       />
 
-      {/* Mobile chat drawer (portal — works over fullscreen) */}
       <MobileChatDrawer
-        open={chatOpen}
-        onClose={() => setChatOpen(false)}
-        socket={socket}
-        messages={messages}
-        unreadCount={unreadCount}
+        open={chatOpen} onClose={() => setChatOpen(false)}
+        socket={socket} messages={messages} myId={myId} unreadCount={unreadCount}
       />
 
-      {/* ── MAIN COLUMN ──────────────────────────────────────────────── */}
+      {/* ── MAIN COLUMN ──────────────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-h-0 min-w-0">
 
-        {/* ── TOP NAV ────────────────────────────────────────────────── */}
-        <header className="flex-shrink-0 bg-slate-900/95 backdrop-blur-sm border-b border-slate-800 px-3 py-2">
+        {/* ── TOP NAV ────────────────────────────────────────────── */}
+        <header className="flex-shrink-0 backdrop-blur-sm px-3 py-2"
+                style={{ background: "rgba(7,18,32,0.95)", borderBottom: "1px solid #0d1d35" }}>
           <div className="flex items-center justify-between gap-2 flex-wrap">
-
-            {/* Left: title + status badges */}
+            {/* Left */}
             <div className="flex items-center gap-2 min-w-0">
-              <h1 className="text-base font-bold whitespace-nowrap">🎬 Watch Together</h1>
-              <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium flex-shrink-0
-                               ${connected ? "bg-emerald-800 text-emerald-300" : "bg-red-900 text-red-300"}`}>
-                {connected ? "●" : "○"}
-              </span>
+              <h1 className="text-base font-bold whitespace-nowrap text-white">🎬 Watch Together</h1>
+              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${connected ? "bg-emerald-400" : "bg-red-400"} animate-pulse`} />
               {isHost && (
-                <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-800 text-indigo-300 font-medium flex-shrink-0">
-                  HOST
-                </span>
+                <span className="text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0"
+                      style={{ background: "#0c4a6e", color: "#7dd3fc" }}>HOST</span>
               )}
               {isPresenceMode && (
-                <span className="text-xs px-2 py-0.5 rounded-full bg-purple-800 text-purple-300 font-medium flex-shrink-0 hidden sm:inline">
-                  👁 Presence
-                </span>
+                <span className="text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 hidden sm:inline"
+                      style={{ background: "#155e75", color: "#67e8f9" }}>👁 Presence</span>
               )}
             </div>
 
-            {/* Center: Mode switch — MOVED HERE FROM BELOW VIDEO */}
+            {/* Center: Mode switch */}
             <div className="flex items-center gap-1.5 flex-shrink-0 order-3 sm:order-2 w-full sm:w-auto">
               {["youtube", "manual"].map((m) => (
                 <button
-                  key={m}
-                  disabled={!isHost}
-                  onClick={() => setMode(m)}
+                  key={m} disabled={!isHost} onClick={() => setMode(m)}
                   className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors flex-1 sm:flex-none
-                               ${state?.mode === m
-                      ? "bg-indigo-600 text-white"
-                      : "bg-slate-800 text-slate-400 hover:bg-slate-700"
-                    } disabled:opacity-40 disabled:cursor-not-allowed`}
+                    disabled:opacity-40 disabled:cursor-not-allowed`}
+                  style={state?.mode === m
+                    ? { background: "#0284c7", color: "#fff" }
+                    : { background: "#0a1628", color: "#64748b" }
+                  }
                 >
                   {m === "youtube" ? "▶ YouTube" : "⏱ Manual"}
                 </button>
               ))}
-              {!isHost && (
-                <span className="text-xs text-slate-600 hidden sm:inline">(host only)</span>
-              )}
             </div>
 
-            {/* Right: room ID, copy, audio */}
+            {/* Right */}
             <div className="flex items-center gap-1.5 text-sm flex-shrink-0 order-2 sm:order-3">
-              <code className="bg-slate-800 px-2 py-0.5 rounded text-xs text-slate-300 hidden xs:inline">
-                {roomId}
-              </code>
-              <button
-                onClick={copyLink}
-                className="bg-slate-700 hover:bg-slate-600 active:bg-slate-500 rounded-lg px-2.5 py-1 text-xs transition-colors"
-              >
+              <code className="px-2 py-0.5 rounded text-xs hidden xs:inline"
+                    style={{ background: "#0a1628", color: "#64748b" }}>{roomId}</code>
+              <button onClick={copyLink}
+                      className="rounded-lg px-2.5 py-1 text-xs transition-colors"
+                      style={{ background: "#0d1d35", color: "#38bdf8" }}>
                 {copyOk ? "✓" : "⎘ Copy"}
               </button>
-              <button
-                onClick={audio.toggle}
-                title={audio.muted ? "Unmute sounds" : "Mute sounds"}
-                className="bg-slate-700 hover:bg-slate-600 rounded-lg w-8 h-7 text-sm flex items-center justify-center transition-colors"
-              >
+              <button onClick={audio.toggle}
+                      title={audio.muted ? "Unmute" : "Mute"}
+                      className="rounded-lg w-8 h-7 text-sm flex items-center justify-center transition-colors"
+                      style={{ background: "#0d1d35" }}>
                 {audio.muted ? "🔇" : "🔔"}
               </button>
             </div>
           </div>
         </header>
 
-        {/* ── VIDEO AREA ─────────────────────────────────────────────── */}
+        {/* ── VIDEO ──────────────────────────────────────────────── */}
         <div className="relative flex-shrink-0 bg-black">
           {state?.mode === "youtube" ? (
             <YouTubePlayer
-              videoId={state?.videoId}
-              isHost={isHost}
-              socket={socket}
-              initial={initial}
-              isPresenceMode={isPresenceMode}
+              videoId={state?.videoId} isHost={isHost} socket={socket}
+              initial={initial} isPresenceMode={isPresenceMode}
               onTimeUpdate={onTimeUpdate}
             />
           ) : (
-            <div className="w-full aspect-video flex items-center justify-center text-slate-500 text-sm">
+            <div className="w-full aspect-video flex items-center justify-center text-sm"
+                 style={{ color: "#475569" }}>
               Manual Sync Mode
             </div>
           )}
@@ -347,9 +356,10 @@ export default function Room() {
 
           {/* Offline overlay */}
           {!connected && (
-            <div className="absolute inset-0 z-10 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center">
+            <div className="absolute inset-0 z-10 flex items-center justify-center"
+                 style={{ background: "rgba(5,13,26,0.85)", backdropFilter: "blur(6px)" }}>
               <div className="text-center px-4">
-                <div className="text-2xl mb-2 animate-spin inline-block">⟳</div>
+                <div className="w-8 h-8 border-2 border-sky-400/30 border-t-sky-400 rounded-full animate-spin mx-auto mb-3" />
                 <p className="text-slate-300 font-semibold text-sm">Reconnecting…</p>
                 <p className="text-slate-500 text-xs mt-1">Room will restore automatically</p>
               </div>
@@ -357,91 +367,67 @@ export default function Room() {
           )}
         </div>
 
-        {/* ── SCROLLABLE CONTROLS (desktop only needs scroll, mobile clips) */}
+        {/* ── CONTROLS (scrollable area) ─────────────────────────── */}
         <div className="flex-1 overflow-y-auto min-h-0">
           <div className="p-3 space-y-3">
-
-            {/* YouTube URL input (host only) */}
             {state?.mode === "youtube" && isHost && (
               <div className="flex gap-2">
                 <input
-                  value={urlInput}
-                  onChange={(e) => setUrlInput(e.target.value)}
+                  value={urlInput} onChange={(e) => setUrlInput(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && loadUrl()}
                   placeholder="Paste YouTube URL…"
-                  className="flex-1 bg-slate-800 rounded-xl px-3 py-2 text-sm outline-none
-                             focus:ring-1 focus:ring-indigo-500 transition-all"
+                  className="flex-1 rounded-xl px-3 py-2 text-sm outline-none text-white
+                             placeholder-slate-500 focus-sky transition-all"
+                  style={{ background: "#0a1628", border: "1px solid #1a3d5c" }}
                 />
-                <button
-                  onClick={loadUrl}
-                  className="bg-indigo-600 hover:bg-indigo-500 rounded-xl px-4 text-sm font-semibold transition-colors"
-                >
+                <button onClick={loadUrl}
+                        className="rounded-xl px-4 text-sm font-semibold transition-colors text-white"
+                        style={{ background: "#0284c7" }}>
                   Load
                 </button>
               </div>
             )}
 
-            {/* Manual sync controls */}
             {state?.mode === "manual" && (
-              <ManualSync
-                socket={socket}
-                isHost={isHost}
-                hostTime={hostTime}
-                instruction={instruction}
-                countdown={countdown}
-              />
+              <ManualSync socket={socket} isHost={isHost}
+                          hostTime={hostTime} instruction={instruction} countdown={countdown} />
             )}
 
-            {/* Presence panel */}
             {state?.users?.length > 0 && (
-              <PresencePanel
-                users={state.users}
-                viewers={viewers}
-                hostId={state.hostId}
-                myId={myId}
-                hostTime={hostProjectedTime}
-              />
+              <PresencePanel users={state.users} viewers={viewers}
+                             hostId={state.hostId} myId={myId} hostTime={hostProjectedTime} />
             )}
 
-            {/* Reaction bar (desktop shows here; mobile shows in bottom bar) */}
-            <div className="hidden lg:flex items-center justify-between py-2 border-t border-slate-800">
+            <div className="hidden lg:flex items-center justify-between py-2"
+                 style={{ borderTop: "1px solid #0d1d35" }}>
               <ReactionBar onReact={react} />
               <span className="text-xs text-slate-500">React 🎉</span>
             </div>
           </div>
         </div>
 
-        {/* ── MOBILE BOTTOM BAR ─────────────────────────────────────── */}
-        {/* Fixed at bottom of main column — always visible, no scroll needed */}
-        <div className="lg:hidden flex-shrink-0 bg-slate-900/95 backdrop-blur-sm border-t border-slate-800 px-3 py-2">
+        {/* ── MOBILE BOTTOM BAR ──────────────────────────────────── */}
+        <div className="lg:hidden flex-shrink-0 backdrop-blur-sm px-3 py-2 pb-safe"
+             style={{ background: "rgba(7,18,32,0.95)", borderTop: "1px solid #0d1d35" }}>
           <div className="flex items-center justify-between gap-3">
-
-            {/* Reactions */}
             <div className="flex gap-1.5 flex-1">
-              {["🔥", "😂", "👏", "❤️", "😮"].map((e) => (
-                <button
-                  key={e}
-                  onClick={() => react(e)}
-                  className="text-lg hover:scale-125 active:scale-110 transition-transform flex-1 text-center"
-                >
+              {["🔥","😂","👏","❤️","😮"].map((e) => (
+                <button key={e} onClick={() => react(e)}
+                        className="text-lg hover:scale-125 active:scale-110 transition-transform flex-1 text-center">
                   {e}
                 </button>
               ))}
             </div>
-
-            {/* Chat open button with unread badge */}
-            <button
-              onClick={openChat}
-              className="relative flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500
-                         active:bg-indigo-700 rounded-xl px-4 py-2 text-sm font-semibold
-                         transition-colors flex-shrink-0"
-            >
+            <button onClick={openChat}
+                    className="relative flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-semibold
+                               transition-colors flex-shrink-0 text-white"
+                    style={{ background: "#0284c7" }}>
               <span>💬</span>
               <span className="hidden xs:inline">Chat</span>
               {unreadCount > 0 && (
-                <span className="absolute -top-1.5 -right-1.5 bg-red-500 text-white text-xs
-                                  font-bold rounded-full w-5 h-5 flex items-center justify-center
-                                  animate-pulse">
+                <span className="absolute -top-1.5 -right-1.5 text-white text-xs font-bold rounded-full
+                                  w-5 h-5 flex items-center justify-center animate-pulse"
+                      style={{ background: "#ef4444" }}>
                   {unreadCount > 9 ? "9+" : unreadCount}
                 </span>
               )}
@@ -450,9 +436,11 @@ export default function Room() {
         </div>
       </div>
 
-      {/* ── DESKTOP SIDEBAR CHAT ────────────────────────────────────── */}
-      <div className="hidden lg:flex lg:w-96 lg:flex-shrink-0 border-l border-slate-800 flex-col">
-        <div className="px-4 py-3 border-b border-slate-800 font-semibold text-sm flex items-center gap-2 flex-shrink-0">
+      {/* ── DESKTOP SIDEBAR ──────────────────────────────────────── */}
+      <div className="hidden lg:flex lg:w-96 lg:flex-shrink-0 flex-col"
+           style={{ borderLeft: "1px solid #0d1d35" }}>
+        <div className="px-4 py-3 font-semibold text-sm flex items-center gap-2 flex-shrink-0"
+             style={{ borderBottom: "1px solid #0d1d35", background: "#071220" }}>
           💬 Chat
           {state?.users?.length > 0 && (
             <span className="ml-auto text-xs text-slate-500">
@@ -461,7 +449,7 @@ export default function Room() {
           )}
         </div>
         <div className="flex-1 min-h-0">
-          <Chat socket={socket} messages={messages} />
+          <Chat socket={socket} messages={messages} myId={myId} />
         </div>
       </div>
     </div>

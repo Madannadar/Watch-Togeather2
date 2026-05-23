@@ -5,13 +5,18 @@ import { SERVER_URL } from "../config.js";
 /**
  * useSocket — Single Socket.IO connection per Room mount.
  * Auto-reconnects and re-joins room on every connect event.
- * Now lives in /hooks/ for clean imports.
+ *
+ * If roomId is null/undefined, skips connection entirely (used
+ * when the name modal hasn't been confirmed yet).
  */
 export function useSocket(roomId, name) {
   const socketRef = useRef(null);
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
+    // Don't connect if no roomId (name not confirmed yet)
+    if (!roomId) return;
+
     const s = io(SERVER_URL, {
       reconnection: true,
       reconnectionDelay: 1000,
@@ -21,13 +26,16 @@ export function useSocket(roomId, name) {
 
     s.on("connect", () => {
       setConnected(true);
-      // (Re)join on every connect handles graceful reconnects.
       s.emit("join_room", { roomId, name });
     });
 
     s.on("disconnect", () => setConnected(false));
 
-    return () => s.disconnect();
+    return () => {
+      s.disconnect();
+      socketRef.current = null;
+      setConnected(false);
+    };
   }, [roomId, name]);
 
   return { socket: socketRef.current, connected };

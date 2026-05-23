@@ -12,8 +12,8 @@ export default defineConfig({
         name: "Watch Together",
         short_name: "WatchTogether",
         description: "Sync YouTube with friends in real time.",
-        theme_color: "#4f46e5",
-        background_color: "#020617",
+        theme_color: "#0ea5e9",
+        background_color: "#050d1a",
         display: "standalone",
         start_url: "/",
         icons: [
@@ -32,14 +32,11 @@ export default defineConfig({
         ],
       },
       workbox: {
-        // Cache app shell (JS, CSS, HTML) for offline-capable shell
         globPatterns: ["**/*.{js,css,html,ico,png,svg,woff2}"],
-        // Don't cache YouTube IFrame API or socket connections
         navigateFallback: "/",
         navigateFallbackDenylist: [/^\/api/, /socket\.io/],
         runtimeCaching: [
           {
-            // Cache YouTube thumbnail images
             urlPattern: /^https:\/\/i\.ytimg\.com\/.*/i,
             handler: "CacheFirst",
             options: {
@@ -47,16 +44,31 @@ export default defineConfig({
               expiration: { maxEntries: 50, maxAgeSeconds: 86400 },
             },
           },
+          {
+            // Cache Google Fonts
+            urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "google-fonts-stylesheets",
+            },
+          },
+          {
+            urlPattern: /^https:\/\/fonts\.gstatic\.com\/.*/i,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "google-fonts-webfonts",
+              expiration: { maxEntries: 10, maxAgeSeconds: 365 * 24 * 60 * 60 },
+            },
+          },
         ],
       },
       devOptions: {
-        // Enable PWA in dev for testing
         enabled: false,
       },
     }),
   ],
   server: {
     host: true,
-    allowedHosts: ["https://watch-togeather2.onrender.com"],
+    allowedHosts: ["watch-togeather2.onrender.com"],
   },
 });

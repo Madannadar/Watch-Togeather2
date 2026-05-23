@@ -1,21 +1,6 @@
 import React, { useCallback, useEffect, useReducer } from "react";
 import ReactDOM from "react-dom";
 
-/**
- * Toast.jsx — Lightweight toast notification system.
- *
- * No external library. Uses CSS transitions.
- * Max 3 toasts stacked. Auto-dismiss in 4s.
- * Position: bottom-right desktop, bottom-center mobile.
- *
- * Usage (via module-level singleton):
- *   import { toast } from "./Toast.jsx";
- *   toast.show("Rahul paused at 22:14", "info");
- *   toast.show("Synced!", "success");
- *
- * Or use the <ToastContainer /> in your app root.
- */
-
 let _dispatch = null;
 let _idCounter = 0;
 
@@ -33,31 +18,20 @@ export const toast = {
 
 function toastReducer(state, action) {
   switch (action.type) {
-    case "add": {
-      const next = [...state, action.payload];
-      // Keep max 3 toasts
-      return next.slice(-3);
-    }
-    case "remove":
-      return state.filter((t) => t.id !== action.payload.id);
-    default:
-      return state;
+    case "add": return [...state, action.payload].slice(-3);
+    case "remove": return state.filter((t) => t.id !== action.payload.id);
+    default: return state;
   }
 }
 
 const TYPE_STYLES = {
-  info: "bg-slate-800 border-slate-700 text-slate-100",
-  success: "bg-emerald-900/90 border-emerald-700 text-emerald-100",
-  warning: "bg-amber-900/90 border-amber-700 text-amber-100",
-  error: "bg-red-900/90 border-red-700 text-red-100",
+  info:    { bg: "#071220", border: "#0d1d35", color: "#e2e8f0" },
+  success: { bg: "rgba(6,78,59,0.7)", border: "#065f46", color: "#a7f3d0" },
+  warning: { bg: "rgba(120,53,15,0.7)", border: "#92400e", color: "#fde68a" },
+  error:   { bg: "rgba(127,29,29,0.6)", border: "#991b1b", color: "#fecaca" },
 };
 
-const TYPE_ICONS = {
-  info: "💬",
-  success: "✅",
-  warning: "⚠️",
-  error: "❌",
-};
+const TYPE_ICONS = { info: "💬", success: "✅", warning: "⚠️", error: "❌" };
 
 function ToastItem({ toast: t, onDismiss }) {
   useEffect(() => {
@@ -65,13 +39,13 @@ function ToastItem({ toast: t, onDismiss }) {
     return () => clearTimeout(timer);
   }, [t.id, t.duration, onDismiss]);
 
+  const style = TYPE_STYLES[t.type] || TYPE_STYLES.info;
+
   return (
     <div
-      className={`
-        flex items-start gap-2 px-4 py-3 rounded-xl border shadow-2xl text-sm
-        backdrop-blur-sm animate-toast-in max-w-xs w-full
-        ${TYPE_STYLES[t.type] || TYPE_STYLES.info}
-      `}
+      className="flex items-start gap-2 px-4 py-3 rounded-xl text-sm
+                 backdrop-blur-sm animate-toast-in max-w-xs w-full shadow-navy-lg"
+      style={{ background: style.bg, border: `1px solid ${style.border}`, color: style.color }}
       role="alert"
     >
       <span className="flex-shrink-0 mt-0.5">{TYPE_ICONS[t.type] || "💬"}</span>
@@ -80,9 +54,7 @@ function ToastItem({ toast: t, onDismiss }) {
         onClick={() => onDismiss(t.id)}
         className="flex-shrink-0 opacity-50 hover:opacity-100 text-lg leading-none"
         aria-label="Dismiss"
-      >
-        ×
-      </button>
+      >×</button>
     </div>
   );
 }
@@ -92,9 +64,7 @@ export function ToastContainer() {
 
   useEffect(() => {
     _dispatch = dispatch;
-    return () => {
-      _dispatch = null;
-    };
+    return () => { _dispatch = null; };
   }, []);
 
   const onDismiss = useCallback((id) => {

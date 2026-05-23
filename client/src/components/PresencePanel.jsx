@@ -1,23 +1,11 @@
 import React, { memo } from "react";
 import { fmt, fmtDrift } from "../utils/timeFormat.js";
 
-/**
- * PresencePanel — Realtime viewer presence list.
- *
- * Displays each viewer's playback time, drift from host, and status.
- * Memoized to prevent re-renders when unrelated Room state changes.
- *
- * Props:
- *  users      — array of { id, name } from room_state
- *  viewers    — Map<id, PresenceEntry> from usePresence
- *  hostId     — socket ID of the host
- *  myId       — this client's socket ID
- *  hostTime   — host's current projected time (seconds)
- */
 function PresencePanel({ users = [], viewers, hostId, myId, hostTime }) {
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
-      <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-1">
+    <div className="rounded-xl p-3" style={{ background: "#071220", border: "1px solid #0d1d35" }}>
+      <div className="text-xs font-semibold uppercase tracking-wider mb-2 flex items-center gap-1"
+           style={{ color: "#64748b" }}>
         <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
         Viewers ({users.length})
       </div>
@@ -33,7 +21,7 @@ function PresencePanel({ users = [], viewers, hostId, myId, hostTime }) {
           />
         ))}
         {users.length === 0 && (
-          <div className="text-xs text-slate-600 italic">No one here yet…</div>
+          <div className="text-xs italic" style={{ color: "#334155" }}>No one here yet…</div>
         )}
       </div>
     </div>
@@ -42,32 +30,34 @@ function PresencePanel({ users = [], viewers, hostId, myId, hostTime }) {
 
 const ViewerRow = memo(function ViewerRow({ user, presence, isHost, isMe, hostTime }) {
   const { status, statusIcon, driftText, driftColor, timeStr } = deriveDisplay(
-    presence,
-    isHost,
-    hostTime
+    presence, isHost, hostTime
   );
 
   return (
-    <div className="flex items-center justify-between text-xs py-1 px-1 rounded hover:bg-slate-800/50 transition-colors">
+    <div className="flex items-center justify-between text-xs py-1 px-1 rounded transition-colors"
+         style={{ cursor: "default" }}
+         onMouseEnter={(e) => e.currentTarget.style.background = "#0a1628"}
+         onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
       <div className="flex items-center gap-1.5 min-w-0">
         <span className="flex-shrink-0">{statusIcon}</span>
         <span
-          className={`font-medium truncate ${
-            isHost ? "text-amber-400" : isMe ? "text-indigo-300" : "text-slate-200"
-          }`}
+          className="font-medium truncate"
+          style={{
+            color: isHost ? "#38bdf8" : isMe ? "#67e8f9" : "#cbd5e1",
+          }}
         >
           {isHost ? "👑 " : ""}{user.name}{isMe ? " (you)" : ""}
         </span>
       </div>
       <div className="flex items-center gap-2 flex-shrink-0 ml-2">
         {timeStr && (
-          <span className="text-slate-400 font-mono tabular-nums">{timeStr}</span>
+          <span className="font-mono tabular-nums" style={{ color: "#64748b" }}>{timeStr}</span>
         )}
         {driftText && !isHost && (
           <span className={`font-mono font-semibold ${driftColor}`}>{driftText}</span>
         )}
         {status && (
-          <span className="text-slate-500 italic">{status}</span>
+          <span className="italic" style={{ color: "#475569" }}>{status}</span>
         )}
       </div>
     </div>
@@ -76,40 +66,19 @@ const ViewerRow = memo(function ViewerRow({ user, presence, isHost, isMe, hostTi
 
 function deriveDisplay(presence, isHost, hostTime) {
   if (!presence) {
-    return {
-      statusIcon: "⚪",
-      timeStr: null,
-      driftText: null,
-      driftColor: "",
-      status: "connected",
-    };
+    return { statusIcon: "⚪", timeStr: null, driftText: null, driftColor: "", status: "connected" };
   }
-
   if (presence.buffering) {
-    return {
-      statusIcon: "🔄",
-      timeStr: fmt(presence.time),
-      driftText: null,
-      driftColor: "",
-      status: "buffering…",
-    };
+    return { statusIcon: "🔄", timeStr: fmt(presence.time), driftText: null, driftColor: "", status: "buffering…" };
   }
-
   if (!presence.playing) {
-    return {
-      statusIcon: "⏸️",
-      timeStr: fmt(presence.time),
-      driftText: null,
-      driftColor: "",
-      status: "paused",
-    };
+    return { statusIcon: "⏸️", timeStr: fmt(presence.time), driftText: null, driftColor: "", status: "paused" };
   }
 
-  // Playing — compute drift vs host
   let driftText = null;
   let driftColor = "";
   if (!isHost && hostTime != null && presence.time != null) {
-    const drift = hostTime - presence.time; // positive = behind host
+    const drift = hostTime - presence.time;
     const absDrift = Math.abs(drift);
     if (absDrift > 0.5) {
       driftText = fmtDrift(drift);
@@ -119,13 +88,7 @@ function deriveDisplay(presence, isHost, hostTime) {
     }
   }
 
-  return {
-    statusIcon: "▶️",
-    timeStr: fmt(presence.time),
-    driftText,
-    driftColor,
-    status: null,
-  };
+  return { statusIcon: "▶️", timeStr: fmt(presence.time), driftText, driftColor, status: null };
 }
 
 export default memo(PresencePanel);

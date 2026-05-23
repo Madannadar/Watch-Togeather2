@@ -13,14 +13,6 @@ app.use(express.json());
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-/** rooms: Map<roomId, Room>
- * Room = {
- *   id, hostId, mode: 'youtube'|'manual',
- *   videoId, playing, currentTime, lastUpdate,
- *   syncMode: 'hard'|'presence',
- *   users: Map<socketId, {id, name}>
- * }
- */
 const rooms = new Map();
 
 function makeRoom(id) {
@@ -28,7 +20,7 @@ function makeRoom(id) {
     id,
     hostId: null,
     mode: "youtube",
-    syncMode: "hard", // NEW: default hard sync
+    syncMode: "hard",
     videoId: null,
     playing: false,
     currentTime: 0,
@@ -39,7 +31,6 @@ function makeRoom(id) {
   return room;
 }
 
-// Project current playback time accounting for elapsed wall clock since lastUpdate.
 function projectedTime(room) {
   if (!room.playing) return room.currentTime;
   const elapsed = (Date.now() - room.lastUpdate) / 1000;
@@ -51,7 +42,7 @@ function publicState(room) {
     id: room.id,
     hostId: room.hostId,
     mode: room.mode,
-    syncMode: room.syncMode, // NEW: include sync mode in state
+    syncMode: room.syncMode,
     videoId: room.videoId,
     playing: room.playing,
     currentTime: projectedTime(room),
@@ -135,7 +126,6 @@ io.on("connection", (socket) => {
     io.to(room.id).emit("seek", { time, serverTime: Date.now() });
   });
 
-  // Periodic drift sync from host (debounced on client side).
   socket.on("sync_state", ({ time, playing }) => {
     const room = rooms.get(joinedRoomId);
     if (!room || socket.id !== room.hostId) return;
@@ -143,9 +133,7 @@ io.on("connection", (socket) => {
     room.playing = playing;
     room.lastUpdate = Date.now();
     socket.to(room.id).emit("sync_state", {
-      time,
-      playing,
-      serverTime: Date.now(),
+      time, playing, serverTime: Date.now(),
     });
   });
 
@@ -158,13 +146,12 @@ io.on("connection", (socket) => {
     io.to(room.id).emit("room_state", publicState(room));
   });
 
-  // ---------- NEW: Sync Mode (hard | presence) ----------
+  // ---------- Sync Mode (hard | presence) ----------
   socket.on("set_sync_mode", ({ syncMode }) => {
     const room = rooms.get(joinedRoomId);
     if (!room || socket.id !== room.hostId) return;
     if (syncMode !== "hard" && syncMode !== "presence") return;
     room.syncMode = syncMode;
-    // Notify all clients of mode change
     io.to(room.id).emit("sync_mode_changed", { syncMode });
     io.to(room.id).emit("room_state", publicState(room));
   });
@@ -192,9 +179,7 @@ io.on("connection", (socket) => {
   socket.on("resync_request", () => {
     const room = rooms.get(joinedRoomId);
     if (!room) return;
-    // Relay to host — host can respond with current state
     io.to(room.hostId).emit("resync_request", { from: socket.id });
-    // Also immediately send current projected time to the requester
     socket.emit("sync_state", {
       time: projectedTime(room),
       playing: room.playing,
@@ -202,13 +187,12 @@ io.on("connection", (socket) => {
     });
   });
 
-  // ---------- NEW: Presence update (relay only — server stays stateless) ----------
+  // ---------- Presence update (relay only — stateless) ----------
   socket.on("presence_update", (data) => {
     const room = rooms.get(joinedRoomId);
     if (!room) return;
     const user = room.users.get(socket.id);
     if (!user) return;
-    // Relay to all OTHER room members (not sender)
     socket.to(room.id).emit("presence_update", {
       userId: socket.id,
       name: user.name,
@@ -220,13 +204,12 @@ io.on("connection", (socket) => {
     });
   });
 
-  // ---------- NEW: Non-host pause notification (Presence Mode) ----------
+  // ---------- Non-host pause notification ----------
   socket.on("user_pause", (data) => {
     const room = rooms.get(joinedRoomId);
     if (!room) return;
     const user = room.users.get(socket.id);
     if (!user) return;
-    // Relay to all room members (so host sees it too)
     socket.to(room.id).emit("user_pause", {
       userId: socket.id,
       name: user.name,
@@ -235,17 +218,63 @@ io.on("connection", (socket) => {
   });
 
   // ---------- Chat ----------
-  socket.on("chat_message", ({ text }) => {
+  socket.on("chat_message", ({ text, replyTo }) => {
     const room = rooms.get(joinedRoomId);
     if (!room) return;
     const user = room.users.get(socket.id);
     if (!user || !text) return;
-    io.to(room.id).emit("chat_message", {
+    const msg = {
       id: nanoid(6),
       userId: socket.id,
       name: user.name,
       text: String(text).slice(0, 500),
       ts: Date.now(),
+    };
+    // Pass through reply metadata if present
+    if (replyTo && replyTo.id && replyTo.name) {
+      msg.replyTo = {
+        id: String(replyTo.id).slice(0, 20),
+        name: String(replyTo.name).slice(0, 30),
+        text: String(replyTo.text || "").slice(0, 80),
+      };
+    }
+    io.to(room.id).emit("chat_message", msg);
+  });
+
+  // ---------- Typing indicators (stateless relay) ----------
+  socket.on("typing_start", () => {
+    const room = rooms.get(joinedRoomId);
+    if (!room) return;
+    const user = room.users.get(socket.id);
+    if (!user) return;
+    socket.to(room.id).emit("typing_start", {
+      userId: socket.id,
+      name: user.name,
+    });
+  });
+
+  socket.on("typing_stop", () => {
+    const room = rooms.get(joinedRoomId);
+    if (!room) return;
+    const user = room.users.get(socket.id);
+    if (!user) return;
+    socket.to(room.id).emit("typing_stop", {
+      userId: socket.id,
+      name: user.name,
+    });
+  });
+
+  // ---------- Message reactions (stateless relay) ----------
+  socket.on("message_reaction", ({ messageId, emoji }) => {
+    const room = rooms.get(joinedRoomId);
+    if (!room) return;
+    const user = room.users.get(socket.id);
+    if (!user) return;
+    io.to(room.id).emit("message_reaction", {
+      messageId,
+      emoji,
+      userId: socket.id,
+      name: user.name,
     });
   });
 
@@ -259,15 +288,12 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     const room = rooms.get(joinedRoomId);
     if (!room) return;
-    const user = room.users.get(socket.id);
     room.users.delete(socket.id);
 
-    // Promote a new host if needed.
     if (room.hostId === socket.id) {
       const next = room.users.keys().next().value;
       room.hostId = next || null;
       if (next) {
-        // Notify room of host transfer
         io.to(room.id).emit("host_transfer", {
           newHostId: next,
           name: room.users.get(next)?.name,
